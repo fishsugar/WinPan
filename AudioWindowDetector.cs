@@ -1,41 +1,54 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using NAudio.CoreAudioApi;
+using NAudio.CoreAudioApi.Interfaces;
 using static WinPan;
 
 public class AudioWindowDetector {
     [DllImport("user32.dll", SetLastError = true)]
     static extern bool GetWindowRect(IntPtr hwnd, out RECT lpRect);
 
-    public int windowPosition = 0;
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern bool IsIconic(IntPtr hwnd);
+
     private AudioSessionManager audioSessionManager;
 
     public AudioWindowDetector(AudioSessionManager manager) {
         audioSessionManager = manager;
     }
 
-    public int DetectAudioWindows() {        
+    public List<AudioSessionControl> DetectAudioWindows() {        
         // Get all audio sessions
         SessionCollection sessions = audioSessionManager.Sessions;
 
-        int activeAudioWindows = 0;
+        var result = new List<AudioSessionControl>();
 
         for (int i = 0; i < sessions.Count; i++)
         {
             var session = sessions[i];
 
-            // Get the process associated with the session
-            Process process = Process.GetProcessById((int)session.GetProcessID);
-
             try {
+                // filter out inactive sessions
+                if (session.State != AudioSessionState.AudioSessionStateActive)
+                    continue;
+
+                // Get the process associated with the session
+                Process process = Process.GetProcessById((int)session.GetProcessID);
+
+                // filter out minimized windows
+                if (IsIconic(process.MainWindowHandle))
+                    continue;
+
                 // Get window position of the process
-                windowPosition = GetHorizontalWindowPosition(process.MainWindowHandle);
-                activeAudioWindows++;
+                GetHorizontalWindowPosition(process.MainWindowHandle);
+
+                result.Add(session);
             } catch(NullReferenceException) {
             }
         }
-        return activeAudioWindows;
+        return result;
     }
     
     private int GetHorizontalWindowPosition(IntPtr windowHandle)

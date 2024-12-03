@@ -1,17 +1,20 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
+using CoreAudio;
 using NAudio.CoreAudioApi;
 
 partial class WinPan
 {
     private AudioSessionManager audioSessionManager;
-    private AudioEndpointVolume volumeControl;
 
-    private float lastVolumeLevel = 0;
-    private float lastVolumeLevelSet = 0;
     private int minScreenX;
     private int maxHorizontalPixels;
+    private HashSet<AudioSessionControl> modifiedSessions = new HashSet<AudioSessionControl>();
 
 
 
@@ -24,8 +27,6 @@ partial class WinPan
         // Get the default audio endpoint
         MMDevice device = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
         Console.WriteLine($"Default Audio Device: {device.FriendlyName}");
-
-        volumeControl = device.AudioEndpointVolume;
 
         // Get the AudioSessionManager from the default device
         this.audioSessionManager = device.AudioSessionManager;
@@ -47,47 +48,77 @@ partial class WinPan
 
     public void UpdateAudioPanning()
     {
-        if (volumeControl.MasterVolumeLevelScalar != lastVolumeLevelSet) {
-            lastVolumeLevel = volumeControl.MasterVolumeLevelScalar;
-        }
-
         AudioWindowDetector detector = new(audioSessionManager);
 
-        if (detector.DetectAudioWindows() == 1) {
-                ApplyPanning(detector.windowPosition + -minScreenX);
-        } else {
+        var audioSessions = detector.DetectAudioWindows();
+        foreach (var session in audioSessions)
+        {
+            try
+            {
+                Process process = Process.GetProcessById((int)session.GetProcessID);
+                int windowPosition = GetHorizontalWindowPosition(process.MainWindowHandle);
+                ApplyPanning(session, windowPosition + -minScreenX);
+            }
+            catch (Exception)
+            {
+                // ignore
+            }
         }
-        lastVolumeLevelSet = volumeControl.MasterVolumeLevelScalar;
     }
 
-
-    private void ApplyPanning(int position)
+    private void ApplyPanning(AudioSessionControl audioSessionControl, int position)
     {
         // Calculate the panning value based on the position and maxHorizontalPixels
         double panningValue = new BalanceCalculator().CalculatePanningValue(position, maxHorizontalPixels, minScreenX);
 
         // Apply the scaled panning value to the audio
-        SetSystemPanning(panningValue);
+        SetAudioSessionPanning(audioSessionControl, panningValue);
     }
 
-    private void SetSystemPanning(double panningValue)
+    private void SetAudioSessionPanning(AudioSessionControl audioSessionControl, double panningValue)
     {
         // Calculate left and right channel volumes
-        double leftChannelVolume = Math.Max(0, Math.Min(lastVolumeLevel, Math.Abs(panningValue - 1) * lastVolumeLevel));
-        double rightChannelVolume = Math.Max(0, Math.Min(lastVolumeLevel, Math.Abs(panningValue + 1) * lastVolumeLevel));
+        double leftChannelVolume = Math.Max(0, Math.Min(1, Math.Abs(panningValue - 1)));
+        double rightChannelVolume = Math.Max(0, Math.Min(1, Math.Abs(panningValue + 1)));
+
+        ChannelAudioVolume channelAudioVolume = new ChannelAudioVolume(audioSessionControl); 
 
         // Check if the endpoint has separate volume controls for left and right channels
-        if (volumeControl.Channels.Count >= 2)
+        if (channelAudioVolume.ChannelCount >= 2)
         {
-            volumeControl.Channels[0].VolumeLevelScalar = (float)leftChannelVolume;
-            volumeControl.Channels[1].VolumeLevelScalar = (float)rightChannelVolume;
+            channelAudioVolume.SetChannelVolume(0, (float)leftChannelVolume);
+            channelAudioVolume.SetChannelVolume(1, (float)rightChannelVolume);
+            modifiedSessions.Add(audioSessionControl);
         }
     }
 
     internal void ResetBalance()
     {
         Console.WriteLine("Exiting: Resetting to center.");
-        SetSystemPanning(0);
+        foreach (var session in modifiedSessions.ToList())
+        {
+            try
+            {
+                SetAudioSessionPanning(session, 0);
+            }
+            catch (Exception)
+            {
+                // ignore
+            }
+        }
+    }
+    
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern bool GetWindowRect(IntPtr hwnd, out RECT lpRect);
+
+    private int GetHorizontalWindowPosition(IntPtr windowHandle)
+    {
+        if (GetWindowRect(windowHandle, out RECT rect))
+        {
+            int horizontalPosition = rect.Left + ((rect.Right - rect.Left) / 2);
+            return horizontalPosition;
+        }
+        throw new NullReferenceException();
     }
 }
 
